@@ -7,21 +7,14 @@ from googleapiclient.discovery import build
 
 app = Flask(__name__)
 
-# Ключевые слова для фильтрации (цена)
-PRICE_KEYWORDS = [
-    "fasi", "ra girs", "fasi ra aqvs", "pasi", "pasi ra aqvs",
-    "ფასი", "ფასი რა აქვს", "რა ღირს", "ფასი მომწერეთ",
-    "pasi momweret", "fasi momweret"
-]
-
-# Переменные окружения
+# 🔑 Переменные окружения
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 SHEET_ID = os.getenv("GOOGLE_SHEETS_ID")
 SHEET_RANGE = os.getenv("GOOGLE_SHEETS_RANGE")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
-# Настройка Google Sheets API
+# 📊 Настройка Google Sheets API
 creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
 creds = Credentials.from_service_account_info(
     creds_dict,
@@ -30,7 +23,7 @@ creds = Credentials.from_service_account_info(
 service = build("sheets", "v4", credentials=creds)
 sheet = service.spreadsheets()
 
-# Функция отправки сообщения обратно клиенту
+# 📩 Отправка личного сообщения в Messenger
 def send_message(recipient_id, text):
     url = f"https://graph.facebook.com/v17.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
     payload = {
@@ -41,6 +34,14 @@ def send_message(recipient_id, text):
     response = requests.post(url, json=payload, headers=headers)
     print("Send API response:", response.json())
 
+# 🔑 Ключевые слова для определения запроса цены
+PRICE_KEYWORDS = [
+    "fasi", "ra girs", "fasi ra aqvs", "pasi", "pasi ra aqvs",
+    "ფასი", "ფასი რა აქვს", "რა ღირს", "ფასი მომწერეთ",
+    "pasi momweret", "fasi momweret"
+]
+
+# 🌐 Webhook
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
@@ -51,33 +52,37 @@ def webhook():
     if request.method == "POST":
         data = request.json
         try:
-            messaging_event = data["entry"][0]["messaging"][0]
-            sender_id = messaging_event["sender"]["id"]
-            message_text = messaging_event["message"]["text"].lower()
+            for change in data["entry"][0]["changes"]:
+                if change["field"] == "feed":
+                    value = change["value"]
+                    post_id = value["post_id"]
+                    comment_text = value.get("message", "").lower()
+                    user_id = value["from"]["id"]  # ID комментатора
 
-            # Проверка ключевых слов
-            if any(keyword in message_text for keyword in PRICE_KEYWORDS):
-                result = sheet.values().get(
-                    spreadsheetId=SHEET_ID,
-                    range=SHEET_RANGE
-                ).execute()
-                values = result.get("values", [])
+                    # Проверяем ключевые слова
+                    if any(keyword in comment_text for keyword in PRICE_KEYWORDS):
+                        # Ищем цену по post_id в Google Sheets
+                        result = sheet.values().get(
+                            spreadsheetId=SHEET_ID,
+                            range=SHEET_RANGE
+                        ).execute()
+                        values = result.get("values", [])
 
-                post_id = message_text.strip()
-                price = None
-                for row in values:
-                    if row[0].lower() == post_id:
-                        price = row[1]
-                        break
+                        price = None
+                        product_name = None
+                        for row in values:
+                            if row[0] == post_id:
+                                product_name = row[1]
+                                price = row[2]
+                                break
 
-                if price:
-                    response_text = f"ფასი ამ პროდუქტისათვის არის {price} ლარი."
-                else:
-                    response_text = "სამწუხაროდ, ვერ ვიპოვე ეს პროდუქტი ცხრილში."
-            else:
-                response_text = "გთხოვთ მიუთითოთ პროდუქტის ID ან სიტყვა 'ფასი'."
+                        if price:
+                            response_text = f"პროდუქტი {product_name} ღირს {price} ლარი."
+                        else:
+                            response_text = "სამწუხაროდ, ვერ ვიპოვე ეს პროდუქტი ცხრილში."
 
-            send_message(sender_id, response_text)
+                        # Отправляем личное сообщение в Messenger
+                        send_message(user_id, response_text)
 
         except Exception as e:
             print("Error:", e)
