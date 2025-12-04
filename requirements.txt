@@ -1,4 +1,4 @@
 Flask
-google-api-python-client
-google-auth
 requests
+gspread
+oauth2client
