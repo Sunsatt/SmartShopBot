@@ -3,7 +3,7 @@ from flask import Flask, request, abort, jsonify
 
 # Google Sheets
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
@@ -25,7 +25,7 @@ def get_sheet():
         "https://www.googleapis.com/auth/drive.file",
         "https://www.googleapis.com/auth/drive",
     ]
-    credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    credentials = Credentials.from_service_account_info(creds_dict, scopes=scope)
     client = gspread.authorize(credentials)
     _sheet = client.open_by_url(SHEET_URL).sheet1
     return _sheet
@@ -46,12 +46,8 @@ def send_private_reply(comment_id, text):
         body = resp.json()
     except Exception:
         body = {"raw": resp.text}
-    ok = 200 <= resp.status_code < 300
     print("📤 Send API:", resp.status_code, body)
-    if not ok and isinstance(body, dict) and "error" in body:
-        err = body["error"]
-        print(f"⚠️ Send error: code={err.get('code')} subcode={err.get('error_subcode')} type={err.get('type')} msg={err.get('message')}")
-    return ok
+    return 200 <= resp.status_code < 300
 
 # --- text normalization & keywords ---
 PRICE_KEYWORDS = [
@@ -59,7 +55,7 @@ PRICE_KEYWORDS = [
     "fasi", "ra girs", "fasi ra aqvs", "pasi", "pasi ra aqvs", "pasi momweret", "fasi momweret",
     "цена", "сколько стоит", "стоимость", "почем", "сколько"
 ]
-PUNCT = re.compile(r"[^\w\s\u10A0-\u10FF]", re.UNICODE)  # keep Georgian letters
+PUNCT = re.compile(r"[^\w\s\u10A0-\u10FF]", re.UNICODE)
 
 def normalize_text(s):
     t = (s or "").lower().strip()
@@ -74,7 +70,6 @@ def is_price_question(text):
 def verify_signature(req):
     sig = req.headers.get("X-Hub-Signature-256")
     if not sig:
-        # Soft fallback in Dev Mode to avoid 403 on missing headers
         return True
     if not sig.startswith("sha256="):
         return False
@@ -89,7 +84,6 @@ def webhook():
             return request.args.get("hub.challenge"), 200
         return "Verification token mismatch", 403
 
-    # POST
     if not verify_signature(request):
         abort(403, description="Invalid signature")
 
@@ -102,7 +96,6 @@ def webhook():
                 if change.get("field") != "feed":
                     continue
                 v = change.get("value", {}) or {}
-                # explicit filters
                 if v.get("item") != "comment" or v.get("verb") != "add":
                     continue
 
@@ -117,7 +110,6 @@ def webhook():
                 if not is_price_question(message):
                     continue
 
-                # sheet lookup
                 response_text = "სამწუხაროდ, ვერ ვიპოვე ეს პროდუქტი ცხრილში."
                 try:
                     sheet = get_sheet()
@@ -132,12 +124,10 @@ def webhook():
                 except Exception as e:
                     print("⚠️ Sheets error:", str(e))
 
-                ok = send_private_reply(comment_id, response_text)
-                print("✅ replied" if ok else "❌ reply failed")
+                send_private_reply(comment_id, response_text)
     except Exception as e:
         print("❌ Handler error:", str(e))
 
-    # Always acknowledge to Meta
     return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
