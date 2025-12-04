@@ -45,9 +45,9 @@ def send_private_reply(comment_id, text):
     headers = {"Content-Type": "application/json"}
     resp = requests.post(url, params=params, json=payload, headers=headers, timeout=10)
     try:
-        print("Send API response:", resp.status_code, resp.json())
+        print("📤 Send API response:", resp.status_code, resp.json())
     except Exception:
-        print("Send API response (non-JSON):", resp.status_code, resp.text)
+        print("📤 Send API response (non-JSON):", resp.status_code, resp.text)
     return resp.status_code == 200
 
 # ===== Keywords (KA/GEO + translit) =====
@@ -57,7 +57,6 @@ PRICE_KEYWORDS = [
 ]
 
 def normalize_text(s):
-    # простая нормализация для поиска ключевых слов
     return (s or "").strip().lower()
 
 # ===== Verify X-Hub-Signature-256 =====
@@ -82,6 +81,9 @@ def webhook():
         abort(403, description="Invalid signature")
 
     data = request.get_json(silent=True) or {}
+    print("📩 Webhook POST received:")
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+
     try:
         for entry in data.get("entry", []):
             for change in entry.get("changes", []):
@@ -91,13 +93,15 @@ def webhook():
                     comment_id = value.get("comment_id")
                     comment_message = normalize_text(value.get("message"))
 
-                    if not comment_id:
-                        continue  # у нас интерес — только комментарии
+                    print(f"🧾 post_id: {post_id}")
+                    print(f"💬 comment_id: {comment_id}")
+                    print(f"🔍 comment_message: {comment_message}")
 
-                    # ключевые слова → формируем ответ
+                    if not comment_id:
+                        continue
+
                     if any(k in comment_message for k in PRICE_KEYWORDS):
-                        # читаем таблицу
-                        records = sheet.get_all_records()  # [{'PostID': '...', 'ProductName': '...', 'Price': '...'}, ...]
+                        records = sheet.get_all_records()
                         price = None
                         product_name = None
                         for row in records:
@@ -108,16 +112,16 @@ def webhook():
 
                         if price and product_name:
                             response_text = f"პროდუქტი {product_name} ღირს {price} ლარი."
+                            print(f"📊 Найдено: {product_name} — {price} ლარი")
                         else:
                             response_text = "სამწუხაროდ, ვერ ვიპოვე ეს პროდუქტი ცხრილში."
+                            print("⚠️ Продукт не найден в таблице")
 
-                        # Private Reply
                         send_private_reply(comment_id, response_text)
         return "EVENT_RECEIVED", 200
     except Exception as e:
-        print("Error:", e)
-        return "ERROR", 200  # Meta будет ретраить; 200 предотвращает бесконечные повторы
+        print("❌ Ошибка обработки Webhook:", str(e))
+        return "ERROR", 200
 
 if __name__ == "__main__":
-    # для локального теста; в Render используй gunicorn app:app
     app.run(host="0.0.0.0", port=5000)
