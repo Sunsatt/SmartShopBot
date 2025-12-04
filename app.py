@@ -77,8 +77,17 @@ def verify_signature(req):
     expected = "sha256=" + mac
     return hmac.compare_digest(sig, expected)
 
+# --- health check ---
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status": "alive"}), 200
+
+# --- webhook ---
 @app.route("/webhook", methods=["GET", "POST"])
+@app.route("/webhook/", methods=["GET", "POST"])  # на всякий случай
 def webhook():
+    print(f"➡️ {request.method} {request.path}")
+
     if request.method == "GET":
         if request.args.get("hub.verify_token") == VERIFY_TOKEN:
             return request.args.get("hub.challenge"), 200
@@ -131,4 +140,5 @@ def webhook():
     return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))  # Render задаёт PORT
+    app.run(host="0.0.0.0", port=port)
