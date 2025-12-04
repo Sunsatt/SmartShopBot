@@ -1,93 +1,123 @@
 import os
 import json
+import hmac
+import hashlib
 import requests
-from flask import Flask, request
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
+from flask import Flask, request, abort
+
+# Google Sheets
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 app = Flask(__name__)
 
-# 🔑 Переменные окружения
+# ===== ENV =====
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
-SHEET_ID = os.getenv("GOOGLE_SHEETS_ID")
-SHEET_RANGE = os.getenv("GOOGLE_SHEETS_RANGE")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+APP_SECRET = os.getenv("APP_SECRET")
 
-# 📊 Настройка Google Sheets API
-creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-creds = Credentials.from_service_account_info(
-    creds_dict,
-    scopes=["https://www.googleapis.com/auth/spreadsheets"]
-)
-service = build("sheets", "v4", credentials=creds)
-sheet = service.spreadsheets()
+SHEET_URL = os.getenv("SHEET_URL")
+SHEET_CREDENTIALS_JSON = os.getenv("SHEET_CREDENTIALS_JSON")
 
-# 📩 Отправка личного сообщения в Messenger
-def send_message(recipient_id, text):
-    url = f"https://graph.facebook.com/v17.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+# ===== Google Sheets setup =====
+def get_sheet():
+    creds_dict = json.loads(SHEET_CREDENTIALS_JSON)
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(credentials)
+    return client.open_by_url(SHEET_URL).sheet1
+
+sheet = get_sheet()
+
+# ===== Send API: Private Reply to comment =====
+def send_private_reply(comment_id, text):
+    url = f"https://graph.facebook.com/v19.0/me/messages"
     payload = {
-        "recipient": {"id": recipient_id},
+        "recipient": {"comment_id": comment_id},
         "message": {"text": text}
     }
+    params = {"access_token": PAGE_ACCESS_TOKEN}
     headers = {"Content-Type": "application/json"}
-    response = requests.post(url, json=payload, headers=headers)
-    print("Send API response:", response.json())
+    resp = requests.post(url, params=params, json=payload, headers=headers, timeout=10)
+    try:
+        print("Send API response:", resp.status_code, resp.json())
+    except Exception:
+        print("Send API response (non-JSON):", resp.status_code, resp.text)
+    return resp.status_code == 200
 
-# 🔑 Ключевые слова для определения запроса цены
+# ===== Keywords (KA/GEO + translit) =====
 PRICE_KEYWORDS = [
-    "fasi", "ra girs", "fasi ra aqvs", "pasi", "pasi ra aqvs",
     "ფასი", "ფასი რა აქვს", "რა ღირს", "ფასი მომწერეთ",
-    "pasi momweret", "fasi momweret"
+    "fasi", "ra girs", "fasi ra aqvs", "pasi", "pasi ra aqvs", "pasi momweret", "fasi momweret",
 ]
 
-# 🌐 Webhook
+def normalize_text(s):
+    # простая нормализация для поиска ключевых слов
+    return (s or "").strip().lower()
+
+# ===== Verify X-Hub-Signature-256 =====
+def verify_signature(req):
+    signature = req.headers.get("X-Hub-Signature-256")
+    if not signature or not signature.startswith("sha256="):
+        return False
+    mac = hmac.new(APP_SECRET.encode("utf-8"), req.data, hashlib.sha256).hexdigest()
+    expected = "sha256=" + mac
+    return hmac.compare_digest(signature, expected)
+
+# ===== Webhook =====
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
         if request.args.get("hub.verify_token") == VERIFY_TOKEN:
             return request.args.get("hub.challenge")
-        return "Invalid token", 403
+        return "Verification token mismatch", 403
 
-    if request.method == "POST":
-        data = request.json
-        try:
-            for change in data["entry"][0]["changes"]:
-                if change["field"] == "feed":
-                    value = change["value"]
-                    post_id = value["post_id"]
-                    comment_text = value.get("message", "").lower()
-                    user_id = value["from"]["id"]  # ID комментатора
+    # POST
+    if not verify_signature(request):
+        abort(403, description="Invalid signature")
 
-                    # Проверяем ключевые слова
-                    if any(keyword in comment_text for keyword in PRICE_KEYWORDS):
-                        # Ищем цену по post_id в Google Sheets
-                        result = sheet.values().get(
-                            spreadsheetId=SHEET_ID,
-                            range=SHEET_RANGE
-                        ).execute()
-                        values = result.get("values", [])
+    data = request.get_json(silent=True) or {}
+    try:
+        for entry in data.get("entry", []):
+            for change in entry.get("changes", []):
+                if change.get("field") == "feed":
+                    value = change.get("value", {})
+                    post_id = value.get("post_id")
+                    comment_id = value.get("comment_id")
+                    comment_message = normalize_text(value.get("message"))
 
+                    if not comment_id:
+                        continue  # у нас интерес — только комментарии
+
+                    # ключевые слова → формируем ответ
+                    if any(k in comment_message for k in PRICE_KEYWORDS):
+                        # читаем таблицу
+                        records = sheet.get_all_records()  # [{'PostID': '...', 'ProductName': '...', 'Price': '...'}, ...]
                         price = None
                         product_name = None
-                        for row in values:
-                            if row[0] == post_id:
-                                product_name = row[1]
-                                price = row[2]
+                        for row in records:
+                            if str(row.get("PostID")).strip() == str(post_id).strip():
+                                product_name = row.get("ProductName")
+                                price = row.get("Price")
                                 break
 
-                        if price:
+                        if price and product_name:
                             response_text = f"პროდუქტი {product_name} ღირს {price} ლარი."
                         else:
                             response_text = "სამწუხაროდ, ვერ ვიპოვე ეს პროდუქტი ცხრილში."
 
-                        # Отправляем личное сообщение в Messenger
-                        send_message(user_id, response_text)
-
-        except Exception as e:
-            print("Error:", e)
-
+                        # Private Reply
+                        send_private_reply(comment_id, response_text)
         return "EVENT_RECEIVED", 200
+    except Exception as e:
+        print("Error:", e)
+        return "ERROR", 200  # Meta будет ретраить; 200 предотвращает бесконечные повторы
 
 if __name__ == "__main__":
+    # для локального теста; в Render используй gunicorn app:app
     app.run(host="0.0.0.0", port=5000)
