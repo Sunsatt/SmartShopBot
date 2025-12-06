@@ -7,13 +7,14 @@ from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
+# --- Environment Variables ---
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 APP_SECRET = os.getenv("APP_SECRET")
 SHEET_URL = os.getenv("SHEET_URL")
 SHEET_CREDENTIALS_JSON = os.getenv("SHEET_CREDENTIALS_JSON")
 
-# --- lazy sheet client ---
+# --- Lazy sheet client ---
 _sheet = None
 def get_sheet():
     global _sheet
@@ -30,26 +31,25 @@ def get_sheet():
     _sheet = client.open_by_url(SHEET_URL).sheet1
     return _sheet
 
-# --- send API ---
+# --- Private Reply API ---
 def send_private_reply(comment_id, text):
-    url = "https://graph.facebook.com/v19.0/me/messages"
+    url = f"https://graph.facebook.com/v24.0/{comment_id}/private_replies"
     headers = {
         "Authorization": f"Bearer {PAGE_ACCESS_TOKEN}",
         "Content-Type": "application/json",
     }
     payload = {
-        "recipient": {"comment_id": str(comment_id)},
-        "message": {"text": text}
+        "message": text
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=10)
     try:
         body = resp.json()
     except Exception:
         body = {"raw": resp.text}
-    print("📤 Send API:", resp.status_code, body)
+    print("📤 Private Reply API:", resp.status_code, body)
     return 200 <= resp.status_code < 300
 
-# --- text normalization & keywords ---
+# --- Keywords ---
 PRICE_KEYWORDS = [
     "ფასი", "ფასი რა აქვს", "რა ღირს", "ფასი მომწერეთ",
     "fasi", "ra girs", "fasi ra aqvs", "pasi", "pasi ra aqvs", "pasi momweret", "fasi momweret",
@@ -66,7 +66,7 @@ def is_price_question(text):
     t = normalize_text(text)
     return any(k in t for k in PRICE_KEYWORDS)
 
-# --- signature verification (soft in dev) ---
+# --- Signature verification ---
 def verify_signature(req):
     sig = req.headers.get("X-Hub-Signature-256")
     if not sig:
@@ -77,12 +77,12 @@ def verify_signature(req):
     expected = "sha256=" + mac
     return hmac.compare_digest(sig, expected)
 
-# --- health check ---
+# --- Health check ---
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "alive"}), 200
 
-# --- webhook ---
+# --- Webhook ---
 @app.route("/webhook", methods=["GET", "POST"])
 @app.route("/webhook/", methods=["GET", "POST"])  # на всякий случай
 def webhook():
